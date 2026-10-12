@@ -34,7 +34,17 @@ không phải xác thực người dùng production.
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from dataclasses import dataclass
+from pathlib import Path
+
+
+_PRINCIPALS_FILE = Path(__file__).resolve().parent.parent / "data" / "principals.json"
+
+
+def _deny(reason: str) -> tuple[bool, str]:
+    return False, reason
 
 
 @dataclass(frozen=True)
@@ -52,4 +62,46 @@ class PolicyContext:
 
 
 def check(context: PolicyContext) -> tuple[bool, str]:
-    raise NotImplementedError("BƯỚC 3b: implement policy check")
+    # This is an invariant: authorized identity and scopes cannot override it.
+    if context.data_classification == "restricted" and context.egress_enabled:
+        return _deny("restricted data cannot use egress")
+
+    if context.data_classification not in {"public", "internal", "restricted"}:
+        return _deny("unknown data classification")
+    if context.delegation_depth < 0:
+        return _deny("delegation depth cannot be negative")
+    if not context.principal_id:
+        return _deny("principal is missing")
+
+    try:
+        principals = json.loads(_PRINCIPALS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _deny("trusted principal registry is unavailable")
+    principal = principals.get(context.principal_id)
+    if principal is None:
+        return _deny("unknown principal")
+
+    if not context.requested_tool:
+        return _deny("requested tool is missing")
+    if context.requested_tool not in principal.get("allowed_tools", []):
+        return _deny("tool is not allowed for principal")
+    if context.requested_tool not in context.agent_scopes:
+        return _deny("tool is outside agent scope")
+    if context.delegation_depth > 0 and context.requested_tool not in context.parent_scopes:
+        return _deny("tool is outside parent delegation scope")
+    if context.request_purpose not in principal.get("purposes", []):
+        return _deny("purpose is not allowed for principal")
+    if not context.agent_owner:
+        return _deny("agent owner is missing")
+
+    try:
+        expiry_text = context.expires_at
+        expiry = datetime.fromisoformat(expiry_text.replace("Z", "+00:00"))
+        if expiry.tzinfo is None:
+            return _deny("expiry must include a timezone")
+        if expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+            return _deny("delegated run has expired")
+    except (TypeError, ValueError):
+        return _deny("expiry is missing or invalid")
+
+    return True, "principal, purpose, scope, and expiry are valid"
