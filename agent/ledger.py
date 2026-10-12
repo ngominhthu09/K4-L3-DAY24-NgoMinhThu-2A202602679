@@ -43,6 +43,10 @@ from pathlib import Path
 
 
 _ZERO_HASH = "0" * 64
+_REQUIRED_FIELDS = {
+    "ts", "agent_id", "run_id", "tool", "args_hash",
+    "classification", "decision", "reason",
+}
 
 
 def _digest(entry: dict) -> str:
@@ -52,8 +56,7 @@ def _digest(entry: dict) -> str:
 
 
 def append(entry: dict, path: Path) -> dict:
-    required = ("ts", "agent_id", "run_id", "tool", "args_hash", "classification", "decision", "reason")
-    if any(key not in entry for key in required):
+    if any(key not in entry for key in _REQUIRED_FIELDS):
         raise ValueError("ledger entry is missing a required field")
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,6 +85,8 @@ def verify(path: Path) -> bool:
                 if not line.strip():
                     return False
                 entry = json.loads(line)
+                if not isinstance(entry, dict) or not _REQUIRED_FIELDS.issubset(entry):
+                    return False
                 if not str(entry.get("reason", "")).strip():
                     return False
                 if entry.get("prev_hash") != expected_prev:
