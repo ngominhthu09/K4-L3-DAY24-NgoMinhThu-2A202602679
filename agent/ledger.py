@@ -37,12 +37,59 @@ rồi gọi verify() phải trả về False.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 
+_ZERO_HASH = "0" * 64
+
+
+def _digest(entry: dict) -> str:
+    payload = {key: value for key, value in entry.items() if key != "hash"}
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def append(entry: dict, path: Path) -> dict:
-    raise NotImplementedError("BƯỚC 3d: implement ledger append")
+    required = ("ts", "agent_id", "run_id", "tool", "args_hash", "classification", "decision", "reason")
+    if any(key not in entry for key in required):
+        raise ValueError("ledger entry is missing a required field")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prev_hash = _ZERO_HASH
+    if path.exists() and path.stat().st_size:
+        try:
+            prev_hash = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])["hash"]
+        except (json.JSONDecodeError, IndexError, KeyError) as exc:
+            raise ValueError("cannot append to an invalid ledger") from exc
+    result = dict(entry)
+    result["prev_hash"] = prev_hash
+    result["hash"] = _digest(result)
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(result, ensure_ascii=False, sort_keys=True) + "\n")
+    return result
 
 
 def verify(path: Path) -> bool:
-    raise NotImplementedError("BƯỚC 3d: implement ledger verify")
+    path = Path(path)
+    if not path.exists():
+        return False
+    expected_prev = _ZERO_HASH
+    try:
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                if not line.strip():
+                    return False
+                entry = json.loads(line)
+                if not str(entry.get("reason", "")).strip():
+                    return False
+                if entry.get("prev_hash") != expected_prev:
+                    return False
+                saved_hash = entry.get("hash")
+                if not isinstance(saved_hash, str) or saved_hash != _digest(entry):
+                    return False
+                expected_prev = saved_hash
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    return True

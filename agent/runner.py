@@ -59,10 +59,24 @@ Interface bắt buộc (agent/loop.py import và gọi hàm này nếu tồn t�
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from agent import ledger, policy, tools
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 DEFAULT_LEDGER_PATH = REPORTS_DIR / "ledger.jsonl"
+PRINCIPALS_FILE = Path(__file__).resolve().parent.parent / "data" / "principals.json"
+AGENT_ID = "lab24-agent"
+SCOPES = ("search_docs", "read_customer", "http_post")
+
+
+def _args_hash(args: object) -> str:
+    canonical = json.dumps(args, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class RunnerScaffoldPending(NotImplementedError):
@@ -71,4 +85,66 @@ class RunnerScaffoldPending(NotImplementedError):
 
 def handle(message: str, llm, log_dir: Path | None = None,
            principal_id: str = "support_l1") -> str:
-    raise RunnerScaffoldPending("BƯỚC 3c: implement trifecta split")
+    try:
+        principals = json.loads(PRINCIPALS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        principals = {}
+    principal = principals.get(principal_id, {})
+    scopes = tuple(principal.get("allowed_tools", ()))
+    parent_scopes = scopes
+    run_id = str(uuid.uuid4())
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    ledger_path = (Path(log_dir) / "ledger.jsonl") if log_dir is not None else DEFAULT_LEDGER_PATH
+
+    def call_tool(name: str, classification: str, purpose: str, args: object, call):
+        context = policy.PolicyContext(
+            data_classification=classification,
+            request_purpose=purpose,
+            agent_owner=f"{AGENT_ID}/{run_id}",
+            delegation_depth=1,
+            egress_enabled=(name == "http_post"),
+            principal_id=principal_id,
+            requested_tool=name,
+            agent_scopes=SCOPES,
+            parent_scopes=parent_scopes,
+            expires_at=expires_at,
+        )
+        allowed, reason = policy.check(context)
+        ledger.append({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "agent_id": AGENT_ID,
+            "run_id": run_id,
+            "tool": name,
+            "args_hash": _args_hash(args),
+            "classification": classification,
+            "decision": "allow" if allowed else "deny",
+            "reason": reason,
+            "on_behalf_of": principal_id,
+            "expires_at": expires_at,
+        }, ledger_path)
+        if not allowed:
+            return None
+        return call()
+
+    docs = call_tool(
+        "search_docs", "internal", "summarize-tickets", {"query": message},
+        lambda: tools.search_docs(message),
+    ) or []
+    combined_text = "\n\n".join(doc["text"] for doc in docs)
+    injected = llm.find_injection(combined_text)
+    collected = []
+    if injected is not None:
+        for customer_id in injected.customer_ids:
+            record = call_tool(
+                "read_customer", "restricted", "support-reply", {"customer_id": customer_id},
+                lambda customer_id=customer_id: tools.read_customer(customer_id),
+            )
+            if record is not None:
+                collected.append(record)
+        if collected:
+            call_tool(
+                "http_post", "restricted", "support-reply",
+                {"url": injected.target_url, "record_count": len(collected)},
+                lambda: tools.http_post(injected.target_url, {"records": collected}),
+            )
+    return llm.summarize(docs)
