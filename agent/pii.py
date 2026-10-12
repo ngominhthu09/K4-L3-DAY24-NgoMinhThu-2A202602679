@@ -30,10 +30,35 @@ set ở tests/vn_pii_testset.jsonl):
 """
 from __future__ import annotations
 
+import re
+
+
+_PATTERNS = (
+    ("EMAIL", re.compile(r"(?<![\w.+-])[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+", re.I)),
+    # Prefer an explicit account label over the same 12-digit shape used
+    # for CCCD.
+    ("VN_BANK_ACCOUNT", re.compile(r"(?i)(?:\bSTK\b|số\s+tài\s+khoản)\s*[:#-]?\s*(\d{8,16})(?!\d)")),
+    ("VN_CCCD", re.compile(r"(?<!\d)\d{12}(?!\d)")),
+    ("VN_PHONE", re.compile(r"(?<!\d)0(?:[ -]?\d){9,10}(?!\d)")),
+)
+
 
 def detect(text: str) -> list[dict]:
-    raise NotImplementedError("BƯỚC 3a: implement PII detection")
+    entities: list[dict] = []
+    for entity_type, pattern in _PATTERNS:
+        for match in pattern.finditer(text):
+            # The account match begins after its label, so only the digits
+            # are marked as the sensitive value.
+            start, end = match.span(1) if entity_type == "VN_BANK_ACCOUNT" else match.span()
+            candidate = {"type": entity_type, "start": start, "end": end}
+            if not any(candidate["start"] < e["end"] and e["start"] < candidate["end"] for e in entities):
+                entities.append(candidate)
+    return sorted(entities, key=lambda e: (e["start"], e["end"]))
 
 
 def redact(text: str) -> str:
-    raise NotImplementedError("BƯỚC 3a: implement PII redaction")
+    entities = detect(text)
+    for entity in reversed(entities):
+        replacement = f"[REDACTED_{entity['type']}]"
+        text = text[:entity["start"]] + replacement + text[entity["end"]:]
+    return text
