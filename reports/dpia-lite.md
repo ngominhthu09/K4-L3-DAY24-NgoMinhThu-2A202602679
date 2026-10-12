@@ -1,6 +1,6 @@
-# DPIA-lite — điền trong checkpoint 5
+# DPIA-lite — checkpoint 5
 
-1. Loại dữ liệu và phân loại:
-2. Mục đích xử lý và principal:
-3. Dữ liệu đi qua những run/tool nào, endpoint nào:
-4. Bằng chứng deny/allow và giới hạn của mock:
+1. **Dữ liệu và phân loại:** bộ dữ liệu hoàn toàn synthetic gồm mã khách hàng, CCCD, số điện thoại, số tài khoản và email trong `data/customers.json`; record khách được xử lý như `restricted`. Nội dung ticket trong `corpus/` là nguồn untrusted. Không có PII hay credential thật trong evidence.
+2. **Mục đích và principal:** tổng hợp các ticket đang mở cho hỗ trợ. Replay sau containment dùng principal mô phỏng `dpo`, purpose `support-reply`; `support_l1` chỉ có quyền tìm tài liệu. Principal được nạp từ fixture, không phải đăng nhập hay xác thực production.
+3. **Luồng và nơi đến:** Run A gọi `search_docs` trên corpus. Runner trích ticket ID số từ filename; Run B đối chiếu `related_tickets` trong `data/customers.json` rồi mới yêu cầu policy cho `read_customer`. Text ticket được redact PII trước khi gọi `summarize`. Payload `http_post` hướng tới sink localhost `127.0.0.1:10024` để diễn tập; policy từ chối dữ liệu restricted khi có egress. Không dùng model/API bên ngoài trong replay.
+4. **Evidence và giới hạn:** trước containment, `reports/attack-before.log` ghi một POST synthetic chứa hồ sơ `KH-000999`. Sau containment, `reports/attack-after.log` có 0 byte; `reports/ledger.jsonl` có 23 entry, tất cả có reason, chuỗi hash verify thành công và `http_post` bị deny vì `restricted data cannot use egress` với `on_behalf_of=dpo`. `--mock`, principal fixture, sink localhost và ledger file không chứng minh được xác thực, vận hành, lưu trữ an toàn hay tuân thủ của hệ thống production; hash chain cũng không chống được xóa đuôi/viết lại toàn bộ file nếu không có mốc tin cậy bên ngoài.
